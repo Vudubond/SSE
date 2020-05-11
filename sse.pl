@@ -114,7 +114,8 @@ sub help {
 "Without options:  Run informational checks on Exim's configuration and server status.\n",
 "--domain=DOMAIN   Check for domain's existence, ownership, and resolution on the server.\n",
       "--email=EMAIL     Email specific checks.\n",
-      "-s                View Breakdown of sent mail.\n";
+      "-s                View Breakdown of sent mail.\n",
+      "-b		 Checks the Main IP and IPs in /etc/ips for a few blacklists.\n";
 }
 
 sub run
@@ -335,6 +336,7 @@ sub domain_resolv {
             'zen.spamhaus.org'            => 'Spamhaus',
             'bl.spamcannibal.org'         => 'Spamcannibal',
             'ubl.unsubscore.com'          => 'LashBack',
+            'b.barracudacentral.org'      => 'Barracuda',
         );
 
         # Grab the mail addresses
@@ -408,9 +410,9 @@ sub domain_resolv {
                         print_normal(
                             " $domain has the following domain keys:\n ");
                         print_normal("\t\\_ $check_dkim");
-                    
+
                 }
-           } 
+           }
 
             else {
                 print_warning("[WARN] * Domain does not have a DKIM record\n");
@@ -516,7 +518,11 @@ sub domain_resolv {
 
             print "\n";
             print "===================\n";
-            print "Total: " . scalar( @dirs - 1 );
+	    if  (@dirs < 1 ) {
+            print "Total: " . @dirs;
+            } else {
+            print "Total: " . scalar( @dirs - 1 ); 
+	    }
             print "\n===================\n";
 
             print_warning("\nTop 20 Email Titles:\n\n\n");
@@ -645,7 +651,7 @@ sub email_valiases {
         if ( $doc_root =~ m/DocumentRoot\s(\/.+?\/.+?\/)/ ) {
             print_warning(
                 "[WARN] * E-mail filter files exist for mailbox $email.\n")
-              if -e "$1\/etc\/$maildomain\/$user\/filter";
+              if -e -s "$1\/etc\/$maildomain\/$user\/filter";
         }
     }
 
@@ -661,23 +667,66 @@ sub email_valiases {
             print_warning("[WARN] * Exim is not running on port 25");
         }
     }
-
+    sub is_ea4 {
+        if ( -f '/etc/cpanel/ea4/is_ea4' ) {
+             return 1;
+        }
+        return;
+    }
     sub check_for_phphandler {
-        my $phpconf = '/usr/local/apache/conf/php.conf.yaml';
-        open my $phpconf_fh, '<', $phpconf;
-        while (<$phpconf_fh>) {
-            if (/^php5:[ \t]+['"]?([^'"]+)/) {
-                $php5handler = $1;
+        my $php = {};
+        my @current_php = split( /\n/, `/usr/local/cpanel/bin/rebuild_phpconf --current` );
+        if ( is_ea4 ) {
+            foreach my $line (@current_php) {
+                my $pkg;
+                if ( $line =~ m{ DEFAULT \s PHP: \s (\S+) }xms ) {
+                    $pkg                        = $1;
+                    $php->{$pkg}->{default_php} = 1;
+                    $php->{default}             = $pkg;
+                    next;
+                }
+                if ( $line =~ m{ (\S+) \s SAPI: \s (\S+) }xms ) {
+                    $pkg = $1;
+                    $php->{$pkg}->{handler} = $2;
+                    foreach ( split( /\n/, `scl enable $pkg 'php -v'` ) ) {
+                        if ( m{ PHP \s (\d+\.\S+) \s \(cli\) \s \(built: \s (\w+\s+\d+\s\d+\s\d+:\d+:\d+) }xms ) {
+                            $php->{$pkg}->{release_version} = $1;
+                            $php->{$pkg}->{build_time}      = $2;
+                            $php->{$pkg}->{build_time} =~ s/  / /;
+                        }
+                    }
+                }
             }
+            my $info;
+            my $cgi_handler = 0;
+            if ( defined($php) && defined( $php->{default} ) && defined( $php->{ $php->{default} }->{release_version} ) && defined( $php-> {$php->{default} }->{handler} ) ) {
+                $cgi_handler = 1 if $php->{ $php->{default} }->{handler} eq "cgi";
+                $info .= "[ EA4 ]";
+                $info .= " [ " . $php->{ $php->{default} }->{release_version} . " ( " . $php->{default} . " ) ]";
+                $info .= " [ " . $php->{ $php->{default} }->{handler} . " ]";
+            }
+            else {
+                $info .= "UNKNOWN";
+            }
+             print_normal('[INFO] * ' . $info . "\n");
         }
-        close $phpconf_fh;
-        chomp $php5handler;
-        if ( $php5handler eq "suphp" ) {
-            print_info("[INFO] * ");
-            print_normal("PHP5's handler is suPHP.\n");
+        else {
+            my $phpconf = '/usr/local/apache/conf/php.conf.yaml';
+            open my $phpconf_fh, '<', $phpconf;
+            while (<$phpconf_fh>) {
+                if (/^php5:[ \t]+['"]?([^'"]+)/) {
+                    $php5handler = $1;
+                }
+            }
+            close $phpconf_fh;
+            chomp $php5handler;
+            if ( $php5handler eq "suphp" ) {
+                print_info("[INFO] * ");
+                print_normal("PHP5's handler is suPHP.\n");
+            }
+            print_warning("[WARN] * PHP5's handler is $php5handler.\n")
+            if $php5handler ne "suphp";
         }
-        print_warning("[WARN] * PHP5's handler is $php5handler.\n")
-          if $php5handler ne "suphp";
     }
 
     sub email_quota {
@@ -691,7 +740,7 @@ sub email_valiases {
         }
 
         my $file = "$home/etc/$domain/quota";
-        
+
 	open FILE, "$file";
 
         while ( $lines = <FILE> ) {
@@ -712,7 +761,7 @@ if (!@unlimited) {
 print_info("[INFO] * ");
 print_normal( "Mailbox Quota: Unlimited\n");
 }
-	
+
 
         sub check_closed_ports {
 
